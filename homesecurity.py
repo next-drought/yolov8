@@ -1,20 +1,40 @@
+import warnings
+import sys
+import os
+
+# Suppress urllib3 warning
+warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
+
+# Redirect stderr
+stderr = sys.stderr
+sys.stderr = open(os.devnull, 'w')
+
+# Your existing imports
 import cv2
 import numpy as np
 from ultralytics import YOLO
-from datetime import datetime
+from datetime import datetime, timedelta
+import glob
 
-def get_motion_area(frame1, frame2):
-    diff = cv2.absdiff(frame1, frame2)
-    gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, thresh = cv2.threshold(blur, 20, 255, cv2.THRESH_BINARY)
-    dilated = cv2.dilate(thresh, None, iterations=3)
-    contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
-    area = 0
-    for contour in contours:
-        area += cv2.contourArea(contour)
-    return area
+# Restore stderr
+sys.stderr = stderr
+
+# Number of days to keep files
+DAYS_TO_KEEP = 7
+
+def delete_old_files(days=DAYS_TO_KEEP):
+    current_time = datetime.now()
+    for file in glob.glob("motion_*.mp4"):
+        try:
+            file_datetime = datetime.strptime(file, "motion_%Y%m%d.mp4")
+            if (current_time - file_datetime).days >= days:
+                os.remove(file)
+                print(f"Deleted old file: {file}")
+        except ValueError:
+            print(f"Couldn't parse datetime from filename: {file}")
+
+def get_object_classes(results):
+    return set(int(box.cls[0]) for r in results for box in r.boxes)
 
 # Initialize YOLO model
 model = YOLO('yolov8n.pt')
@@ -28,48 +48,71 @@ original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 original_fps = int(cap.get(cv2.CAP_PROP_FPS))
 
 # Define new, reduced resolution and frame rate
-new_width = 640  # or 480 for even smaller size
+new_width = 640
 new_height = int(new_width * original_height / original_width)
-new_fps = 10  # Reduced frame rate
+new_fps = 10
 
-# Initialize video writer (we'll create it when motion is detected)
+# Initialize video writer
 out = None
+current_day = datetime.now().date()
 
-# Read two initial frames for motion detection
-ret, frame1 = cap.read()
-ret, frame2 = cap.read()
+# Read initial frame
+ret, frame = cap.read()
+frame_resized = cv2.resize(frame, (new_width, new_height))
+prev_results = model(frame_resized)
+prev_classes = get_object_classes(prev_results)
 
-motion_detected = False
-motion_frames = 0
-MOTION_THRESHOLD = 10000  # Adjust this value based on your needs
+new_object_detected = False
+new_object_frames = 0
+NEW_OBJECT_THRESHOLD = 5  # Number of consecutive frames to confirm a new object
+
+# Initialize last_cleanup_time
+last_cleanup_time = datetime.now()
 
 while True:
     try:
-        # Resize frame for processing
-        frame2_resized = cv2.resize(frame2, (new_width, new_height))
+        # Check if it's time to clean up old files (once per day)
+        if (datetime.now() - last_cleanup_time).days >= 1:
+            delete_old_files()
+            last_cleanup_time = datetime.now()
 
-        # Perform detection on resized frame
-        results = model(frame2_resized)
-
-        # Check for motion
-        motion_area = get_motion_area(cv2.resize(frame1, (new_width, new_height)), frame2_resized)
-        
-        if motion_area > MOTION_THRESHOLD:
-            if not motion_detected:
-                print("Motion detected!")
-                # Create a new video writer with H.264 codec
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                out = cv2.VideoWriter(f'motion_{timestamp}.mp4', 
-                                      cv2.VideoWriter_fourcc(*'avc1'), new_fps, (new_width, new_height))
-            motion_detected = True
-            motion_frames = 30  # Continue recording for 30 more frames
-        elif motion_frames > 0:
-            motion_frames -= 1
-        else:
-            motion_detected = False
+        # Check if it's a new day
+        if datetime.now().date() != current_day:
             if out is not None:
                 out.release()
-                out = None
+            current_day = datetime.now().date()
+            out = None
+
+        # Read and resize frame
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_resized = cv2.resize(frame, (new_width, new_height))
+
+        # Perform detection on resized frame
+        results = model(frame_resized)
+
+        # Get current object classes
+        current_classes = get_object_classes(results)
+
+        # Check for new objects
+        if current_classes - prev_classes:
+            if not new_object_detected:
+                new_object_frames = NEW_OBJECT_THRESHOLD
+            else:
+                new_object_frames = max(new_object_frames - 1, 0)
+        else:
+            new_object_frames = max(new_object_frames - 1, 0)
+
+        new_object_detected = new_object_frames > 0
+
+        if new_object_detected and new_object_frames == NEW_OBJECT_THRESHOLD:
+            print("New object detected!")
+            if out is None:
+                # Create a new video writer with H.264 codec
+                timestamp = datetime.now().strftime("%Y%m%d")
+                out = cv2.VideoWriter(f'motion_{timestamp}.mp4', 
+                                      cv2.VideoWriter_fourcc(*'avc1'), new_fps, (new_width, new_height))
 
         # Process and visualize results
         for r in results:
@@ -78,28 +121,27 @@ while True:
                 # Bounding box
                 x1, y1, x2, y2 = box.xyxy[0]
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                cv2.rectangle(frame2_resized, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.rectangle(frame_resized, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
                 # Class name and confidence
                 cls = int(box.cls[0])
                 conf = float(box.conf[0])
                 label = f'{model.names[cls]} {conf:.2f}'
-                cv2.putText(frame2_resized, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(frame_resized, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-        # Add motion indicator
-        if motion_detected:
-            cv2.putText(frame2_resized, "Motion Detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        # Add new object indicator
+        if new_object_detected:
+            cv2.putText(frame_resized, "New Object Detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         # Show frame
-        cv2.imshow('YOLOv8 Detection with Motion', frame2_resized)
+        cv2.imshow('YOLOv8 Detection with New Object', frame_resized)
 
-        # Save frame if motion is detected
-        if motion_detected and out is not None:
-            out.write(frame2_resized)
+        # Save frame if video writer is initialized
+        if out is not None:
+            out.write(frame_resized)
 
-        # Update frames for next iteration
-        frame1 = frame2
-        ret, frame2 = cap.read()
+        # Update previous classes
+        prev_classes = current_classes
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
