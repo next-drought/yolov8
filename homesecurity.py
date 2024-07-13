@@ -23,9 +23,14 @@ model = YOLO('yolov8n.pt')
 cap = cv2.VideoCapture(0)  # Change to your video source if needed
 
 # Get the video properties
-frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-fps = int(cap.get(cv2.CAP_PROP_FPS))
+original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+original_fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+# Define new, reduced resolution and frame rate
+new_width = 640  # or 480 for even smaller size
+new_height = int(new_width * original_height / original_width)
+new_fps = 10  # Reduced frame rate
 
 # Initialize video writer (we'll create it when motion is detected)
 out = None
@@ -40,19 +45,22 @@ MOTION_THRESHOLD = 10000  # Adjust this value based on your needs
 
 while True:
     try:
-        # Perform detection
-        results = model(frame2)
+        # Resize frame for processing
+        frame2_resized = cv2.resize(frame2, (new_width, new_height))
+
+        # Perform detection on resized frame
+        results = model(frame2_resized)
 
         # Check for motion
-        motion_area = get_motion_area(frame1, frame2)
+        motion_area = get_motion_area(cv2.resize(frame1, (new_width, new_height)), frame2_resized)
         
         if motion_area > MOTION_THRESHOLD:
             if not motion_detected:
                 print("Motion detected!")
-                # Create a new video writer
+                # Create a new video writer with H.264 codec
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 out = cv2.VideoWriter(f'motion_{timestamp}.mp4', 
-                                      cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
+                                      cv2.VideoWriter_fourcc(*'avc1'), new_fps, (new_width, new_height))
             motion_detected = True
             motion_frames = 30  # Continue recording for 30 more frames
         elif motion_frames > 0:
@@ -70,24 +78,24 @@ while True:
                 # Bounding box
                 x1, y1, x2, y2 = box.xyxy[0]
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                cv2.rectangle(frame2, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.rectangle(frame2_resized, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
                 # Class name and confidence
                 cls = int(box.cls[0])
                 conf = float(box.conf[0])
                 label = f'{model.names[cls]} {conf:.2f}'
-                cv2.putText(frame2, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(frame2_resized, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         # Add motion indicator
         if motion_detected:
-            cv2.putText(frame2, "Motion Detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(frame2_resized, "Motion Detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         # Show frame
-        cv2.imshow('YOLOv8 Detection with Motion', frame2)
+        cv2.imshow('YOLOv8 Detection with Motion', frame2_resized)
 
         # Save frame if motion is detected
         if motion_detected and out is not None:
-            out.write(frame2)
+            out.write(frame2_resized)
 
         # Update frames for next iteration
         frame1 = frame2
