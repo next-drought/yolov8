@@ -1,6 +1,11 @@
 import warnings
 import sys
 import os
+import cv2
+import numpy as np
+from ultralytics import YOLO
+from datetime import datetime, timedelta
+import glob
 
 # Suppress urllib3 warning
 warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
@@ -9,18 +14,12 @@ warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
 stderr = sys.stderr
 sys.stderr = open(os.devnull, 'w')
 
-# Your existing imports
-import cv2
-import numpy as np
-from ultralytics import YOLO
-from datetime import datetime, timedelta
-import glob
 
 # Restore stderr
 sys.stderr = stderr
 
 # Number of days to keep files
-DAYS_TO_KEEP = 7
+DAYS_TO_KEEP = 10
 
 def delete_old_files(days=DAYS_TO_KEEP):
     current_time = datetime.now()
@@ -34,7 +33,7 @@ def delete_old_files(days=DAYS_TO_KEEP):
             print(f"Couldn't parse datetime from filename: {file}")
 
 def get_object_classes(results):
-    return set(int(box.cls[0]) for r in results for box in r.boxes)
+    return {int(box.cls[0]): model.names[int(box.cls[0])] for r in results for box in r.boxes}
 
 # Initialize YOLO model
 model = YOLO('yolov8n.pt')
@@ -96,9 +95,11 @@ while True:
         current_classes = get_object_classes(results)
 
         # Check for new objects
-        if current_classes - prev_classes:
+        new_objects = set(current_classes.keys()) - set(prev_classes.keys())
+        if new_objects:
             if not new_object_detected:
                 new_object_frames = NEW_OBJECT_THRESHOLD
+                new_detected_objects = [current_classes[cls] for cls in new_objects]
             else:
                 new_object_frames = max(new_object_frames - 1, 0)
         else:
@@ -107,7 +108,7 @@ while True:
         new_object_detected = new_object_frames > 0
 
         if new_object_detected and new_object_frames == NEW_OBJECT_THRESHOLD:
-            print("New object detected!")
+            print(f"New object(s) detected: {', '.join(new_detected_objects)}")
             if out is None:
                 # Create a new video writer with H.264 codec
                 timestamp = datetime.now().strftime("%Y%m%d")
@@ -123,15 +124,10 @@ while True:
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
                 cv2.rectangle(frame_resized, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-                # Class name and confidence
-                cls = int(box.cls[0])
-                conf = float(box.conf[0])
-                label = f'{model.names[cls]} {conf:.2f}'
-                cv2.putText(frame_resized, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
         # Add new object indicator
         if new_object_detected:
-            cv2.putText(frame_resized, "New Object Detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(frame_resized, f"New Object(s): {', '.join(new_detected_objects)}", 
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         # Show frame
         cv2.imshow('YOLOv8 Detection with New Object', frame_resized)
