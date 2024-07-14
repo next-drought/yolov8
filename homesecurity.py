@@ -14,7 +14,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
 stderr = sys.stderr
 sys.stderr = open(os.devnull, 'w')
 
-
 # Restore stderr
 sys.stderr = stderr
 
@@ -35,11 +34,54 @@ def delete_old_files(days=DAYS_TO_KEEP):
 def get_object_classes(results):
     return {int(box.cls[0]): model.names[int(box.cls[0])] for r in results for box in r.boxes}
 
+# Function to apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+def apply_clahe(image):
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+    limg = cv2.merge((cl, a, b))
+    final = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+    return final
+
+# Function to adjust exposure automatically
+def adjust_exposure(frame, target_brightness=125):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    current_brightness = np.mean(gray)
+    
+    exposure = cap.get(cv2.CAP_PROP_EXPOSURE)
+    if current_brightness < target_brightness:
+        exposure = min(exposure + 0.1, 0)  # Increase exposure, max 0
+    elif current_brightness > target_brightness:
+        exposure = max(exposure - 0.1, -10)  # Decrease exposure, min -10
+    
+    cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
+    return frame
+
+def reduce_brightness(image, percentage=10):
+    """Reduce the brightness of the image to the specified percentage."""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    
+    v = cv2.multiply(v, percentage / 100.0)
+    v = np.clip(v, 0, 255).astype(np.uint8)
+    
+    final_hsv = cv2.merge((h, s, v))
+    image = cv2.cvtColor(final_hsv, cv2.COLOR_HSV2BGR)
+    return image
+
 # Initialize YOLO model
 model = YOLO('yolov8n.pt')
 
 # Open video stream
 cap = cv2.VideoCapture(0)  # Change to your video source if needed
+
+# Adjust camera settings to handle overexposure
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Disable auto-exposure
+cap.set(cv2.CAP_PROP_EXPOSURE, -13)  # Set exposure to a very low value
+cap.set(cv2.CAP_PROP_GAIN, 0)       # Minimum gain
+cap.set(cv2.CAP_PROP_BRIGHTNESS, 0)  # Minimum brightness
+cap.set(cv2.CAP_PROP_CONTRAST, 32)   # Lower contrast
 
 # Get the video properties
 original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -57,7 +99,11 @@ current_day = datetime.now().date()
 
 # Read initial frame
 ret, frame = cap.read()
-frame_resized = cv2.resize(frame, (new_width, new_height))
+frame = adjust_exposure(frame)
+frame_clahe = apply_clahe(frame)
+frame_dark = reduce_brightness(frame_clahe, percentage=10)  # Reduce brightness to 10%
+frame_resized = cv2.resize(frame_dark, (new_width, new_height))
+
 prev_results = model(frame_resized)
 prev_classes = get_object_classes(prev_results)
 
@@ -82,11 +128,15 @@ while True:
             current_day = datetime.now().date()
             out = None
 
-        # Read and resize frame
+        # Read frame
         ret, frame = cap.read()
         if not ret:
             break
-        frame_resized = cv2.resize(frame, (new_width, new_height))
+        
+        # Apply exposure adjustment and CLAHE
+        frame = adjust_exposure(frame)
+        frame_clahe = apply_clahe(frame)
+        frame_resized = cv2.resize(frame_clahe, (new_width, new_height))
 
         # Perform detection on resized frame
         results = model(frame_resized)
