@@ -1,6 +1,11 @@
 import warnings
 import sys
 import os
+import cv2
+import numpy as np
+from ultralytics import YOLO
+from datetime import datetime, timedelta
+import glob
 
 # Suppress urllib3 warning
 warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
@@ -9,24 +14,21 @@ warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
 stderr = sys.stderr
 sys.stderr = open(os.devnull, 'w')
 
-# Your existing imports
-import cv2
-import numpy as np
-from ultralytics import YOLO
-from datetime import datetime, timedelta
-import glob
-
 # Restore stderr
 sys.stderr = stderr
 
 # Number of days to keep files
 DAYS_TO_KEEP = 7
 
+# New constants for recording optimization
+RECORD_DURATION_AFTER_DETECTION = 10  # seconds to continue recording after new object disappears
+SIGNIFICANT_CHANGE_THRESHOLD = 0.1  # fraction of pixels that need to change to be considered significant
+
 def delete_old_files(days=DAYS_TO_KEEP):
     current_time = datetime.now()
     for file in glob.glob("motion_*.mp4"):
         try:
-            file_datetime = datetime.strptime(file, "motion_%Y%m%d.mp4")
+            file_datetime = datetime.strptime(file, "motion_%Y%m%d_%H%M%S.mp4")
             if (current_time - file_datetime).days >= days:
                 os.remove(file)
                 print(f"Deleted old file: {file}")
@@ -35,6 +37,12 @@ def delete_old_files(days=DAYS_TO_KEEP):
 
 def get_object_classes(results):
     return set(int(box.cls[0]) for r in results for box in r.boxes)
+
+def is_significant_change(prev_frame, current_frame, threshold):
+    diff = cv2.absdiff(prev_frame, current_frame)
+    changed_pixels = np.sum(diff > 30)  # Consider pixels with difference > 30 as changed
+    total_pixels = prev_frame.shape[0] * prev_frame.shape[1]
+    return changed_pixels / total_pixels > threshold
 
 # Initialize YOLO model
 model = YOLO('yolov8n.pt')
@@ -52,19 +60,13 @@ new_width = 640
 new_height = int(new_width * original_height / original_width)
 new_fps = 10
 
-# Initialize video writer
+# Initialize variables
 out = None
 current_day = datetime.now().date()
-
-# Read initial frame
-ret, frame = cap.read()
-frame_resized = cv2.resize(frame, (new_width, new_height))
-prev_results = model(frame_resized)
-prev_classes = get_object_classes(prev_results)
-
-new_object_detected = False
-new_object_frames = 0
-NEW_OBJECT_THRESHOLD = 5  # Number of consecutive frames to confirm a new object
+prev_frame = None
+recording_start_time = None
+last_new_object_time = None
+prev_classes = set()
 
 # Initialize last_cleanup_time
 last_cleanup_time = datetime.now()
@@ -96,23 +98,36 @@ while True:
         current_classes = get_object_classes(results)
 
         # Check for new objects
-        if current_classes - prev_classes:
-            if not new_object_detected:
-                new_object_frames = NEW_OBJECT_THRESHOLD
-            else:
-                new_object_frames = max(new_object_frames - 1, 0)
-        else:
-            new_object_frames = max(new_object_frames - 1, 0)
+        new_object_detected = bool(current_classes - prev_classes)
 
-        new_object_detected = new_object_frames > 0
+        # Determine if we should be recording
+        current_time = datetime.now()
+        should_record = new_object_detected or (
+            last_new_object_time and 
+            (current_time - last_new_object_time).total_seconds() < RECORD_DURATION_AFTER_DETECTION
+        )
 
-        if new_object_detected and new_object_frames == NEW_OBJECT_THRESHOLD:
-            print("New object detected!")
+        if should_record:
+            if new_object_detected:
+                print("New object detected!")
+                last_new_object_time = current_time
+
             if out is None:
-                # Create a new video writer with H.264 codec
-                timestamp = datetime.now().strftime("%Y%m%d")
+                # Start a new recording
+                timestamp = current_time.strftime("%Y%m%d_%H%M%S")
                 out = cv2.VideoWriter(f'motion_{timestamp}.mp4', 
                                       cv2.VideoWriter_fourcc(*'avc1'), new_fps, (new_width, new_height))
+                recording_start_time = current_time
+
+            # Write frame to video
+            out.write(frame_resized)
+
+        elif out is not None:
+            # Check if we should stop recording due to lack of significant changes
+            if prev_frame is not None and not is_significant_change(prev_frame, frame_resized, SIGNIFICANT_CHANGE_THRESHOLD):
+                out.release()
+                out = None
+                print(f"Stopped recording due to lack of significant changes. Duration: {(current_time - recording_start_time).total_seconds():.2f} seconds")
 
         # Process and visualize results
         for r in results:
@@ -129,19 +144,16 @@ while True:
                 label = f'{model.names[cls]} {conf:.2f}'
                 cv2.putText(frame_resized, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-        # Add new object indicator
-        if new_object_detected:
-            cv2.putText(frame_resized, "New Object Detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        # Add recording indicator
+        if out is not None:
+            cv2.putText(frame_resized, "Recording", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         # Show frame
-        cv2.imshow('YOLOv8 Detection with New Object', frame_resized)
+        cv2.imshow('YOLOv8 Detection with Optimized Recording', frame_resized)
 
-        # Save frame if video writer is initialized
-        if out is not None:
-            out.write(frame_resized)
-
-        # Update previous classes
+        # Update previous classes and frame
         prev_classes = current_classes
+        prev_frame = frame_resized.copy()
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
