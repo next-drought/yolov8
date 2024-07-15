@@ -41,7 +41,7 @@ def delete_old_files(days=DAYS_TO_KEEP):
             logging.warning(f"Couldn't parse datetime from filename: {file}")
 
 def get_object_classes(results):
-    return set(int(box.cls[0]) for r in results for box in r.boxes)
+    return set((int(box.cls[0]), model.names[int(box.cls[0])]) for r in results for box in r.boxes)
 
 def is_significant_change(prev_frame, current_frame, threshold):
     diff = cv2.absdiff(prev_frame, current_frame)
@@ -72,6 +72,7 @@ prev_frame = None
 recording_start_time = None
 last_new_object_time = None
 prev_classes = set()
+new_objects = set()
 
 # Initialize last_cleanup_time
 last_cleanup_time = datetime.now()
@@ -99,6 +100,9 @@ while True:
             break
         frame_resized = cv2.resize(frame, (new_width, new_height))
 
+        # Create a copy of the resized frame for recording
+        frame_for_recording = frame_resized.copy()
+
         # Perform detection on resized frame
         results = model(frame_resized)
 
@@ -106,7 +110,8 @@ while True:
         current_classes = get_object_classes(results)
 
         # Check for new objects
-        new_object_detected = bool(current_classes - prev_classes)
+        new_objects = current_classes - prev_classes
+        new_object_detected = bool(new_objects)
 
         # Determine if we should be recording
         current_time = datetime.now()
@@ -115,6 +120,44 @@ while True:
             (current_time - last_new_object_time).total_seconds() < RECORD_DURATION_AFTER_DETECTION
         )
 
+        # Process and visualize results
+        for r in results:
+            boxes = r.boxes
+            for box in boxes:
+                # Bounding box
+                x1, y1, x2, y2 = box.xyxy[0]
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                
+                # Class name and confidence
+                cls = int(box.cls[0])
+                conf = float(box.conf[0])
+                label = f'{model.names[cls]} {conf:.2f}'
+                
+                # Check if this object is new
+                is_new = (cls, model.names[cls]) in new_objects
+                
+                # Set color based on whether the object is new
+                color = (0, 255, 0) if not is_new else (0, 0, 255)
+                
+                # Draw bounding box and label on both display frame and recording frame
+                for frame in [frame_resized, frame_for_recording]:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    
+                    # Add "NEW!" to label if it's a new object
+                    display_label = "NEW! " + label if is_new else label
+                    
+                    # Draw label
+                    cv2.putText(frame, display_label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        # Add recording indicator
+        if out is not None:
+            cv2.putText(frame_resized, "Recording", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.putText(frame_for_recording, "Recording", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        # Show frame
+        cv2.imshow('YOLOv8 Detection with Optimized Recording', frame_resized)
+
+        # Record frame if necessary
         if should_record:
             if new_object_detected:
                 logging.info("New object detected!")
@@ -128,8 +171,8 @@ while True:
                 recording_start_time = current_time
                 logging.info(f"Started new recording: motion_{timestamp}.mp4")
 
-            # Write frame to video
-            out.write(frame_resized)
+            # Write frame with labels to video
+            out.write(frame_for_recording)
 
         elif out is not None:
             # Check if we should stop recording due to lack of significant changes
@@ -137,28 +180,6 @@ while True:
                 out.release()
                 out = None
                 logging.info(f"Stopped recording due to lack of significant changes. Duration: {(current_time - recording_start_time).total_seconds():.2f} seconds")
-
-        # Process and visualize results
-        for r in results:
-            boxes = r.boxes
-            for box in boxes:
-                # Bounding box
-                x1, y1, x2, y2 = box.xyxy[0]
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                cv2.rectangle(frame_resized, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-                # Class name and confidence
-                cls = int(box.cls[0])
-                conf = float(box.conf[0])
-                label = f'{model.names[cls]} {conf:.2f}'
-                cv2.putText(frame_resized, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-        # Add recording indicator
-        if out is not None:
-            cv2.putText(frame_resized, "Recording", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        # Show frame
-        cv2.imshow('YOLOv8 Detection with Optimized Recording', frame_resized)
 
         # Update previous classes and frame
         prev_classes = current_classes
