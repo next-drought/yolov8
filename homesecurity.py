@@ -6,6 +6,11 @@ import numpy as np
 from ultralytics import YOLO
 from datetime import datetime, timedelta
 import glob
+import logging
+
+# Set up logging
+logging.basicConfig(filename='home_security.log', level=logging.INFO,
+                    format='%(asctime)s:%(levelname)s:%(message)s')
 
 # Suppress urllib3 warning
 warnings.filterwarnings("ignore", category=UserWarning, module="urllib3")
@@ -31,16 +36,16 @@ def delete_old_files(days=DAYS_TO_KEEP):
             file_datetime = datetime.strptime(file, "motion_%Y%m%d_%H%M%S.mp4")
             if (current_time - file_datetime).days >= days:
                 os.remove(file)
-                print(f"Deleted old file: {file}")
+                logging.info(f"Deleted old file: {file}")
         except ValueError:
-            print(f"Couldn't parse datetime from filename: {file}")
+            logging.warning(f"Couldn't parse datetime from filename: {file}")
 
 def get_object_classes(results):
     return set(int(box.cls[0]) for r in results for box in r.boxes)
 
 def is_significant_change(prev_frame, current_frame, threshold):
     diff = cv2.absdiff(prev_frame, current_frame)
-    changed_pixels = np.sum(diff > 30)  # Consider pixels with difference > 30 as changed
+    changed_pixels = np.sum(diff > 60)  # Consider pixels with difference > 60 as changed
     total_pixels = prev_frame.shape[0] * prev_frame.shape[1]
     return changed_pixels / total_pixels > threshold
 
@@ -71,6 +76,8 @@ prev_classes = set()
 # Initialize last_cleanup_time
 last_cleanup_time = datetime.now()
 
+logging.info("Starting home security system")
+
 while True:
     try:
         # Check if it's time to clean up old files (once per day)
@@ -88,6 +95,7 @@ while True:
         # Read and resize frame
         ret, frame = cap.read()
         if not ret:
+            logging.error("Failed to read frame")
             break
         frame_resized = cv2.resize(frame, (new_width, new_height))
 
@@ -109,7 +117,7 @@ while True:
 
         if should_record:
             if new_object_detected:
-                print("New object detected!")
+                logging.info("New object detected!")
                 last_new_object_time = current_time
 
             if out is None:
@@ -118,6 +126,7 @@ while True:
                 out = cv2.VideoWriter(f'motion_{timestamp}.mp4', 
                                       cv2.VideoWriter_fourcc(*'avc1'), new_fps, (new_width, new_height))
                 recording_start_time = current_time
+                logging.info(f"Started new recording: motion_{timestamp}.mp4")
 
             # Write frame to video
             out.write(frame_resized)
@@ -127,7 +136,7 @@ while True:
             if prev_frame is not None and not is_significant_change(prev_frame, frame_resized, SIGNIFICANT_CHANGE_THRESHOLD):
                 out.release()
                 out = None
-                print(f"Stopped recording due to lack of significant changes. Duration: {(current_time - recording_start_time).total_seconds():.2f} seconds")
+                logging.info(f"Stopped recording due to lack of significant changes. Duration: {(current_time - recording_start_time).total_seconds():.2f} seconds")
 
         # Process and visualize results
         for r in results:
@@ -156,13 +165,16 @@ while True:
         prev_frame = frame_resized.copy()
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
+            logging.info("User requested program termination")
             break
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logging.error(f"An error occurred: {e}")
+        break
 
 # Clean up
 cap.release()
 if out is not None:
     out.release()
 cv2.destroyAllWindows()
+logging.info("Program terminated")
