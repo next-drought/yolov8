@@ -3,11 +3,11 @@
 # Optionally remove from local hooks with 'rm .git/hooks/pre-commit'
 
 # Define bot property if installed via https://github.com/marketplace/pre-commit-ci
-ci:
-  autofix_prs: true
-  autoupdate_commit_msg: "[pre-commit.ci] pre-commit suggestions"
-  autoupdate_schedule: monthly
-  submodules: true
+# ci:
+#   autofix_prs: true
+#   autoupdate_commit_msg: "[pre-commit.ci] pre-commit suggestions"
+#   autoupdate_schedule: monthly
+#   submodules: true
 
 # Exclude directories (optional)
 # exclude: 'docs/'
